@@ -1,142 +1,165 @@
 # BrainQuant Generator
 
-A local alpha generation and evaluation pipeline for WorldQuant-style formulas.
+A high-performance, local alpha formula generation, compilation, and evaluation pipeline for quantitative trading (WorldQuant-style expressions).
 
-This repository currently runs a native-only alpha compiler and evaluator pipeline, generating formulas, compiling them to Polars expressions, evaluating them against local market data, and logging results at every stage.
+The core engine native-compiles abstract syntax tree (AST) alpha formulas directly into **Polars (`pl.Expr`) vector expressions**, evaluates backtest performance metrics against local Parquet market data snapshot files, and filters elite signal candidates into persistent logs.
 
-## Project Structure
+---
 
-- `main.py` - Interactive entry point. Choose between native compiler test, hybrid system, or both.
-- `alpha_background_runner.py` - Main continuous execution loop that generates formulas, compiles them, evaluates metrics, and logs results.
-- `local_alpha_engine.py` - AST data structures, formula generator, native compilation to Polars, and alpha metric calculation.
-- `ingest.py` - Script to fetch and format market data into Parquet files.
-- `operatorRAW.json` - Operator metadata used by formula generator.
-- `elite_alphas.csv` - Persisted list of elite formulas that meet target metrics.
-- `data/raw/` - Input Parquet files used by the engine for simulation.
+## 🏗 System Architecture & Module Details
 
-## Requirements
+Here is an exact breakdown of what each module does and where specific logic lives:
 
-- Python 3.11
-- `polars`
-- `python-dotenv`
-- (Optional) Any other package imports already present in the repo, but the active pipeline depends mainly on `polars`.
+```
+                  ┌───────────────────────┐
+                  │       main.py         │ (CLI Menu Entrypoint)
+                  └───────────┬───────────┘
+                              │
+               ┌──────────────┴──────────────┐
+               ▼                             ▼
+  ┌─────────────────────────┐   ┌───────────────────────────┐
+  │  local_alpha_engine.py  │   │alpha_background_runner.py │
+  │ (AST Gen & Polars Comp) │   │ (Continuous Loop & Logs)  │
+  └────────────┬────────────┘   └─────────────┬─────────────┘
+               │                              │
+               ├──────────────────────────────┘
+               ▼
+  ┌─────────────────────────┐
+  │  data/raw/*.parquet     │ (Market Data Ingestion by ingest.py)
+  └─────────────────────────┘
+```
 
-## Setup
+---
 
-1. Create and activate a virtual environment:
-   ```bash
-   python -m venv venv
-   .\venv\Scripts\Activate.ps1
-   ```
+### 1. `main.py` (User Interface Entrypoint)
+- **Role**: Command-Line Interface (CLI) launcher.
+- **Functionality**:
+  - Displays interactive menu options (`1`: Single AST test compile, `2`: Continuous background run loop, `3`: Combined).
+  - Uses `subprocess.run` to invoke `local_alpha_engine.py` or `alpha_background_runner.py` in isolated execution context.
 
-2. Install required packages:
-   ```bash
-   pip install polars python-dotenv
-   ```
+---
 
-3. Place your input parquet market data under:
-   ```text
-   data/raw/
-   ```
-   Each file should be a Parquet file representing a universe snapshot.
+### 2. `local_alpha_engine.py` (Core Engine, AST, Compiler & Backtest)
+- **Role**: Heart of the expression generator, AST parser, Polars compiler, and performance evaluator.
+- **Key Components**:
+  - `ASTNode`: Data structure representing nodes in the AST (`type`: `field`, `constant`, or `operator`). Contains `to_string()` method to format human-readable WorldQuant formulas.
+  - `load_local_data(data_dir="data/raw")`:
+    - Scans all `.parquet` files under `data/raw/`.
+    - Automatically maps & normalizes standard price/volume schema (`date`, `open`, `high`, `low`, `close`, `volume`, `vwap`).
+    - Standardizes date strings into datetime objects and applies date range filters (2017 to current date).
+    - Sorts by ticker & date, returning a unified `pl.LazyFrame`.
+  - `NativeAlphaGenerator`:
+    - Uses `operatorRAW.json` metadata to construct random, valid AST trees with defined recursive depth bounds (`max_depth`).
+    - Supports operators (unary, binary, rolling time-series like `ts_mean`, `ts_std`, `rank`, `delay`, `delta`).
+  - `compile_to_polars(node: ASTNode)`:
+    - Recursively parses `ASTNode` hierarchies and translates them directly into executable `polars.Expr` statements.
+    - Handles field column mapping, math operations (`+`, `-`, `*`, `/`, `abs`, `log`, `sqrt`), and time-series rolling functions windowed over ticker partitions (`pl.col(...).over("ticker")`).
+  - `calculate_brain_metrics(df: pl.DataFrame, signal_col="alpha_signal")`:
+    - Executes vector cross-sectional signals.
+    - Neutralizes alphas cross-sectionally by subtracting group mean (`pl.col(signal_col) - pl.col(signal_col).mean().over("date")`).
+    - Computes 1-day forward returns per asset (`close.shift(-1) / close - 1`).
+    - Calculates portfolio metrics:
+      - **Sharpe Ratio**: Annualized ratio of portfolio mean return over return volatility (\(\text{Sharpe} = \sqrt{252} \cdot \frac{\mu}{\sigma}\)).
+      - **Turnover**: Average daily portfolio position change rate.
+      - **Short Percentage**: Fraction of total allocation weight in short positions.
 
-4. Ensure the repository root contains:
-   - `main.py`
-   - `alpha_background_runner.py`
-   - `local_alpha_engine.py`
-   - `operatorRAW.json`
+---
 
-## Usage
+### 3. `alpha_background_runner.py` (Continuous Backtest Runner & Logging Pipeline)
+- **Role**: Execution orchestrator that continuously generates, backtests, filters, and logs alphas.
+- **Functionality**:
+  - Imports engine functions from `local_alpha_engine.py`.
+  - Runs continuous generation loops in configurable batch sizes (`BATCH_SIZE = 3`).
+  - Evaluates performance metrics against target criteria:
+    - **Sharpe Target**: \(\ge 1.0\) (or configured threshold)
+    - **Turnover Max**: \(\le 50.0\%\)
+    - **Short Min**: \(\ge 40.0\%\)
+  - Logs results to CSV files (`logs_generated.csv`, `logs_processed.csv`, `logs_elite.csv`, `elite_alphas.csv`).
+  - Writes failure tracebacks and syntax/compilation issues to `transpiler_errors.log`.
 
-Run the interactive entrypoint:
+---
 
+### 4. `ingest.py` (Market Data Acquisition & Ingestion)
+- **Role**: Utility script for downloading raw stock price data and saving snapshot Parquet files.
+- **Functionality**:
+  - Uses `pytickersymbols` and `yfinance` to pull historical OHLCV data for index constituents (S&P 500, NASDAQ 100, DAX, CAC 40, SMI, AEX).
+  - Multi-threaded download manager using Python `ThreadPoolExecutor`.
+  - Normalizes column names into canonical format (`date`, `open`, `high`, `low`, `close`, `volume`, `adj_close`).
+  - Saves formatted output as individual Parquet files into `data/raw/<ticker>.parquet`.
+
+---
+
+### 5. `operatorRAW.json` (Operator Schema Definition)
+- **Role**: JSON schema defining operator signatures used by `NativeAlphaGenerator`.
+- **Contains**:
+  - Operator types (time-series, cross-sectional, element-wise arithmetic).
+  - Parameter expectations (e.g., number of input children nodes, lookback window constraints).
+
+---
+
+### 6. Legacy Modules (Phrased out/Deprecated)
+- `rule_translator.py`: Legacy rule-based string translator (bypassed in favor of direct AST -> Polars compiler).
+- `llm_trans.py`: Legacy LLM prompt transpiler (bypassed to remove rate-limiting latency and code translation errors).
+
+---
+
+## 📊 Data & File Outputs
+
+The pipeline generates and ignores (via `.gitignore`) the following artifacts during runtime:
+
+| File / Path | Description |
+| :--- | :--- |
+| `data/raw/*.parquet` | Market dataset snapshots per ticker. |
+| `logs_generated.csv` | Log of all AST formulas generated per cycle. |
+| `logs_processed.csv` | Log of valid formulas successfully evaluated with Sharpe, turnover, & short metrics. |
+| `logs_elite.csv` | High-performing formulas passing Sharpe, turnover, and short constraints. |
+| `elite_alphas.csv` | Summary export file of elite signals. |
+| `transpiler_errors.log` | Stack traces and uncompiled operator error details. |
+
+---
+
+## 🚀 Quickstart Guide
+
+### 1. Requirements
+- Python 3.11+
+- Installed packages: `polars`, `python-dotenv`, `yfinance`, `pytickersymbols`, `pandas`, `tqdm`
+
+### 2. Installation
+```bash
+# Clone the repository
+git clone https://github.com/DheerajS-DM/alpha-generator.git
+cd alpha-generator
+
+# Create virtual environment
+python -m venv venv
+.\venv\Scripts\Activate.ps1   # On Windows PowerShell
+
+# Install dependencies
+pip install polars python-dotenv yfinance pytickersymbols pandas tqdm
+```
+
+### 3. Ingest Market Data
+Run `ingest.py` to download market data into `data/raw/`:
+```bash
+python ingest.py
+```
+
+### 4. Run Alpha Generator Engine
+Launch the CLI launcher:
 ```bash
 python main.py
 ```
+Select **Option 2** for continuous alpha discovery and evaluation.
 
-Then choose:
+---
 
-1. `Run Native Compiler Test (single formula)`
-2. `Run Hybrid Translation System (continuous)`
-3. `Run Both (Native test first, then Hybrid)`
-4. `Exit`
+## ⚙️ Configuration & Thresholds
 
-> Note: The current pipeline is configured to run native compilation only. The hybrid/LLM logic has been phased out because it was causing severe bottlenecks and invalid formula generation.
+To adjust backtest filters or generator parameters, edit top-level constants in `alpha_background_runner.py`:
 
-## Active Pipeline Flow
-
-The active pipeline is in `alpha_background_runner.py`:
-
-1. Load local data via `load_local_data()` from `local_alpha_engine.py`.
-2. Generate formula ASTs with `NativeAlphaGenerator.generate_ast()`.
-3. Compile ASTs to Polars `pl.Expr` objects using `compile_to_polars()`.
-4. Evaluate compiled expressions against the dataset.
-5. Calculate alpha metrics with `calculate_brain_metrics()`.
-6. Persist logs and elite formulas.
-
-## Logging and Output Files
-
-The runner produces several persistent log files:
-
-- `logs_generated.csv`
-  - All formulas generated in each cycle
-  - Columns: `timestamp`, `generation_id`, `formula`, `formula_length`, `translator`
-
-- `logs_processed.csv`
-  - All formulas that were successfully evaluated
-  - Columns: `timestamp`, `processed_id`, `formula`, `polars_code`, `sharpe`, `turnover`, `short_pct`, `translator`
-
-- `logs_elite.csv`
-  - Elite formulas meeting target metrics
-  - Columns: `timestamp`, `elite_id`, `formula`, `polars_code`, `sharpe`, `turnover`, `short_pct`, `translator`
-
-- `elite_alphas.csv`
-  - Backward-compatible elite alpha summary
-
-- `transpiler_errors.log`
-  - Detailed runtime logs and failure messages
-
-## Metric Targets
-
-The active evaluation targets are configured in `alpha_background_runner.py`:
-
-- Sharpe >= `1.2`
-- Turnover < `50.0%`
-- Short Exposure > `40.0%`
-
-These thresholds are defined at the top of `alpha_background_runner.py`.
-
-## Current Known Limitations
-
-- The system currently uses **native compilation only**.
-- `rule_translator.py` and `llm_trans.py` exist in the repo but are not part of the active processing path.
-- The pipeline may skip formulas with unsupported operators when `compile_to_polars()` raises `NotImplementedError`.
-- Input data is expected in Parquet format under `data/raw/`.
-- **Timeframe Restriction**: Data is filtered from 2017 to current date to provide a longer historical period for robust alpha evaluation. This ensures alphas are tested on recent market conditions while maintaining sufficient historical data for statistical significance.
-
-## Troubleshooting
-
-- If the system generates many formulas but `logs_processed.csv` remains empty, the native compiler is likely skipping unsupported AST operators.
-- If the runner fails on startup, verify that `data/raw/` contains Parquet files and that `polars` is installed.
-- If you see encoding errors in Windows console output, this repository no longer uses emoji characters in logs.
-
-## Extending the Pipeline
-
-To improve the system, consider:
-
-- Adding support for more AST operators in `local_alpha_engine.py`.
-- Improving `NativeAlphaGenerator` to generate more realistic formula structures.
-- Replacing the legacy LLM/transpiler path with a faster validator or a deterministic translator.
-- Adding proper tests for `compile_to_polars()` and metric calculations.
-
-## Run Example
-
-```bash
-python main.py
+```python
+SHARPE_THRESHOLD = 1.0  # Minimum Sharpe ratio target
+TURNOVER_MAX = 50.0      # Maximum allowed turnover percentage
+SHORT_MIN = 40.0         # Minimum required short exposure percentage
+BATCH_SIZE = 3           # Formulations per processing batch
 ```
-
-Then select option `2` to run the continuous generator/evaluator loop. Press `Ctrl+C` to stop gracefully.
-
-## Contact
-
-Use this README as the central guide for understanding the current pipeline and improving the native-only alpha generation system.
