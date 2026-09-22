@@ -39,7 +39,7 @@ Below is the global architecture flow showing how data and control pass between 
 
 ### 1. `main.py` - CLI Launcher Dynamics
 
-`main.py` provides an interactive menu gateway to execute the native compiler test or the continuous background runner in an isolated subprocess context.
+`main.py` provides an interactive menu gateway to execute the native compiler test, the continuous background runner, or the new local web dashboard.
 
 ```
 +-------------------------------------------------------------------------+
@@ -50,20 +50,20 @@ Below is the global architecture flow showing how data and control pass between 
     | Choice 1                       | Choice 2                       | Choice 3
     v                                v                                v
 +-----------------------+   +-----------------------+   +-----------------------+
-|  run_native_compiler  |   |   run_hybrid_system   |   |        Run Both       |
+|  run_native_compiler  |   | run_background_runner |   |      run_dashboard    |
 +-----------+-----------+   +-----------+-----------+   +-----------+-----------+
             |                           |                           |
             v                           v                           v
 +-----------------------+   +-----------------------+   +-----------------------+
-| Subprocess execution: |   | Subprocess execution: |   | Sequential execution: |
-| local_alpha_engine.py |   | alpha_background_     |   | 1. Native test        |
-|                       |   | runner.py             |   | 2. Background runner  |
+| Subprocess execution: |   | Subprocess execution: |   | Subprocess execution: |
+| local_alpha_engine.py |   | alpha_background_     |   | dashboard.py (HTTP)   |
+|                       |   | runner.py             |   | Serves index.html     |
 +-----------------------+   +-----------------------+   +-----------------------+
 ```
 
 - **Choice 1**: Runs a standalone compilation and backtest test on a single generated formula.
 - **Choice 2**: Starts the continuous background backtesting engine loop.
-- **Choice 3**: Executes Choice 1 followed by Choice 2.
+- **Choice 3**: Launches a local web server displaying a beautiful UI for monitoring processed alphas.
 
 ---
 
@@ -78,7 +78,7 @@ Below is the global architecture flow showing how data and control pass between 
          |
          v
 +-----------------------------+      +-------------------------------+
-|    NativeAlphaGenerator     | ---> |            ASTNode            |
+|       AlphaGenerator        | ---> |            ASTNode            |
 | (Random recursive generator)|      | (type: field/constant/op)     |
 +-----------------------------+      +---------------+---------------+
                                                      |
@@ -100,7 +100,7 @@ Below is the global architecture flow showing how data and control pass between 
 ```
 
 #### Internal Breakdown:
-1. **AST Generation (`NativeAlphaGenerator`)**:
+1. **AST Generation (`AlphaGenerator`)**:
    - Parses allowed operators and arities from `operatorRAW.json`.
    - Recursively constructs an `ASTNode` tree up to a specified maximum depth.
 2. **Polars Compilation (`compile_to_polars`)**:
@@ -133,7 +133,7 @@ Below is the global architecture flow showing how data and control pass between 
 +-------------------------------------------------------------------------+
 |                             CONTINUOUS LOOP                             |
 |                                                                         |
-|  1. Generate Batch of AST Formulas (NativeAlphaGenerator)               |
+|  1. Generate Batch of AST Formulas (AlphaGenerator)                     |
 |     + Write formulas to logs_generated.csv                              |
 |                                                                         |
 |  2. Compile & Backtest Loop (compile_to_polars + calculate_brain_metrics|
