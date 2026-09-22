@@ -1,6 +1,5 @@
 """
-Main entry point for the brainquantgenerator system.
-Runs both the native compiler test and the hybrid translation system.
+Main entry point for the BrainQuant Generator system.
 """
 
 import os
@@ -25,10 +24,10 @@ def run_native_compiler():
         print(f"Error running native compiler: {e}")
         return False
 
-def run_hybrid_system():
-    """Run the hybrid translation system."""
+def run_background_runner():
+    """Run the continuous generation and evaluation system."""
     print("\n" + "=" * 60)
-    print("Running Hybrid Translation System")
+    print("Running Alpha Background Generator (Continuous)")
     print("=" * 60)
     print("Press Ctrl+C to stop the system")
     print("=" * 60)
@@ -44,7 +43,27 @@ def run_hybrid_system():
         print("\nSystem stopped by user")
         return True
     except Exception as e:
-        print(f"Error running hybrid system: {e}")
+        print(f"Error running background runner: {e}")
+        return False
+
+def run_dashboard():
+    """Launch the Web Dashboard."""
+    print("\n" + "=" * 60)
+    print("Launching BrainQuant Web Dashboard")
+    print("=" * 60)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        result = subprocess.run(
+            [sys.executable, "dashboard.py"],
+            cwd=script_dir,
+            capture_output=False
+        )
+        return result.returncode == 0
+    except KeyboardInterrupt:
+        print("\nDashboard stopped by user")
+        return True
+    except Exception as e:
+        print(f"Error launching dashboard: {e}")
         return False
 
 def main():
@@ -54,9 +73,9 @@ def main():
     
     # Ask user what to run
     print("\nChoose an option:")
-    print("1. Run Native Compiler Test (single formula)")
-    print("2. Run Hybrid Translation System (continuous)")
-    print("3. Run Both (Native test first, then Hybrid)")
+    print("1. Run Local Engine Test (single formula check)")
+    print("2. Run Continuous Background Generator")
+    print("3. Launch Web Dashboard UI")
     print("4. Exit")
     
     choice = input("\nEnter choice (1-4): ").strip()
@@ -64,31 +83,24 @@ def main():
     if choice == "1":
         success = run_native_compiler()
         if success:
-            print("\n✓ Native compiler test completed successfully")
+            print("\n✓ Engine test completed successfully")
         else:
-            print("\n✗ Native compiler test failed")
+            print("\n✗ Engine test failed")
     
     elif choice == "2":
-        success = run_hybrid_system()
+        success = run_background_runner()
         if success:
-            print("\n✓ Hybrid system completed successfully")
+            print("\n✓ Background generator completed successfully")
         else:
-            print("\n✗ Hybrid system failed")
-    
+            print("\n✗ Background generator failed")
+            
     elif choice == "3":
-        print("\n--- Step 1: Native Compiler Test ---")
-        success1 = run_native_compiler()
-        
-        time.sleep(2)
-        
-        print("\n--- Step 2: Hybrid Translation System ---")
-        success2 = run_hybrid_system()
-        
-        if success1 and success2:
-            print("\n✓ Both systems completed successfully")
+        success = run_dashboard()
+        if success:
+            print("\n✓ Dashboard session ended")
         else:
-            print(f"\n✗ System status: Native={success1}, Hybrid={success2}")
-    
+            print("\n✗ Dashboard failed to launch")
+            
     elif choice == "4":
         print("Exiting...")
         return

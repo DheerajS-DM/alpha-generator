@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BrainQuant Generator Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --surface-color: rgba(30, 41, 59, 0.7);
+            --surface-border: rgba(255, 255, 255, 0.1);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-color: #3b82f6;
+            --accent-hover: #2563eb;
+            --success-color: #10b981;
+            --danger-color: #ef4444;
+            --warning-color: #f59e0b;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.15) 0px, transparent 50%);
+            background-attachment: fixed;
+            color: var(--text-primary);
+            margin: 0;
+            padding: 2rem;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--surface-border);
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin: 0;
+            background: linear-gradient(to right, #60a5fa, #34d399);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .btn {
+            background: var(--surface-color);
+            border: 1px solid var(--surface-border);
+            color: var(--text-primary);
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            backdrop-filter: blur(10px);
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .btn.active {
+            background: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .table-container {
+            background: var(--surface-color);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--surface-border);
+            border-radius: 1rem;
+            overflow: hidden;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        th {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 1rem;
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            cursor: pointer;
+            user-select: none;
+            border-bottom: 1px solid var(--surface-border);
+        }
+
+        th:hover {
+            color: var(--text-primary);
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--surface-border);
+            vertical-align: middle;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .formula-cell {
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            color: #a78bfa;
+            max-width: 400px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .copy-btn {
+            background: transparent;
+            border: 1px solid var(--surface-border);
+            color: var(--text-secondary);
+            padding: 0.3rem 0.6rem;
+            border-radius: 0.3rem;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+            margin-left: 0.5rem;
+        }
+
+        .copy-btn:hover {
+            background: var(--accent-color);
+            color: white;
+            border-color: var(--accent-color);
+        }
+
+        .metric {
+            font-weight: 600;
+        }
+
+        .metric.good { color: var(--success-color); }
+        .metric.bad { color: var(--danger-color); }
+        .metric.warn { color: var(--warning-color); }
+
+        .toast {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            background: var(--success-color);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: 500;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>BrainQuant Alpha Dashboard</h1>
+            <div class="controls">
+                <div class="auto-refresh">
+                    <input type="checkbox" id="autoRefresh" checked>
+                    <label for="autoRefresh">Auto-refresh (5s)</label>
+                </div>
+                <button class="btn active" id="btnAll" onclick="loadData('all')">Processed Alphas</button>
+                <button class="btn" id="btnElite" onclick="loadData('elite')">Elite Alphas</button>
+            </div>
+        </header>
+
+        <div class="table-container">
+            <table id="dataTable">
+                <thead>
+                    <tr>
+                        <th onclick="sortTable(0)">ID ↕</th>
+                        <th onclick="sortTable(1)">Timestamp ↕</th>
+                        <th>Formula</th>
+                        <th onclick="sortTable(3)">Med Sharpe ↕</th>
+                        <th onclick="sortTable(4)">Worst Sharpe ↕</th>
+                        <th onclick="sortTable(5)">Consistency ↕</th>
+                        <th onclick="sortTable(6)">Turnover ↕</th>
+                        <th onclick="sortTable(7)">Short % ↕</th>
+                    </tr>
+                </thead>
+                <tbody id="tableBody">
+                    <tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">Loading data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="toast" id="toast">Formula copied to clipboard!</div>
+
+    <script>
+        let currentMode = 'all';
+        let currentData = [];
+        let sortCol = 0;
+        let sortAsc = false;
+        let refreshInterval = null;
+
+        function loadData(mode) {
+            currentMode = mode;
+            document.getElementById('btnAll').classList.toggle('active', mode === 'all');
+            document.getElementById('btnElite').classList.toggle('active', mode === 'elite');
+            
+            const file = mode === 'all' ? 'logs_processed.csv' : 'elite_alphas.csv';
+            
+            // Add cache buster
+            Papa.parse(`${file}?t=${new Date().getTime()}`, {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    currentData = results.data;
+                    renderTable();
+                },
+                error: function(err) {
+                    document.getElementById('tableBody').innerHTML = `<tr><td colspan="8" style="text-align:center; color: var(--danger-color);">Error loading ${file}. Waiting for generation...</td></tr>`;
+                }
+            });
+        }
+
+        function getColorClass(value, type) {
+            const val = parseFloat(value);
+            if (isNaN(val)) return '';
+            
+            if (type === 'sharpe') {
+                if (val >= 1.0) return 'good';
+                if (val <= 0.0) return 'bad';
+                return 'warn';
+            }
+            if (type === 'consistency') {
+                if (val >= 60) return 'good';
+                if (val < 40) return 'bad';
+                return 'warn';
+            }
+            if (type === 'turnover') {
+                if (val < 50) return 'good';
+                if (val > 80) return 'bad';
+                return 'warn';
+            }
+            return '';
+        }
+
+        function copyFormula(formula) {
+            navigator.clipboard.writeText(formula).then(() => {
+                const toast = document.getElementById('toast');
+                toast.classList.add('show');
+                setTimeout(() => toast.classList.remove('show'), 2000);
+            });
+        }
+
+        function sortTable(colIndex) {
+            if (sortCol === colIndex) {
+                sortAsc = !sortAsc;
+            } else {
+                sortCol = colIndex;
+                sortAsc = false; // default to descending for metrics
+            }
+            renderTable();
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('tableBody');
+            if (currentData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">No alphas generated yet.</td></tr>';
+                return;
+            }
+
+            // Map columns internally
+            // logs_processed: timestamp,processed_id,formula,median_sharpe,worst_sharpe,consistency,turnover,short_pct,windows
+            // elite_alphas: timestamp,elite_id,formula,median_sharpe,worst_sharpe,consistency,turnover,short_pct,windows
+            
+            let displayData = [...currentData];
+            
+            // Sort
+            displayData.sort((a, b) => {
+                let keys = ['processed_id', 'timestamp', 'formula', 'median_sharpe', 'worst_sharpe', 'consistency', 'turnover', 'short_pct'];
+                if (currentMode === 'elite') keys[0] = 'elite_id';
+                
+                let valA = a[keys[sortCol]];
+                let valB = b[keys[sortCol]];
+                
+                if (sortCol !== 1 && sortCol !== 2) {
+                    valA = parseFloat(valA) || 0;
+                    valB = parseFloat(valB) || 0;
+                }
+                
+                if (valA < valB) return sortAsc ? -1 : 1;
+                if (valA > valB) return sortAsc ? 1 : -1;
+                return 0;
+            });
+
+            tbody.innerHTML = '';
+            
+            displayData.forEach(row => {
+                const idKey = currentMode === 'all' ? 'processed_id' : 'elite_id';
+                const id = row[idKey] || '-';
+                
+                const tr = document.createElement('tr');
+                
+                tr.innerHTML = `
+                    <td style="color: var(--text-secondary)">#${id}</td>
+                    <td style="font-size: 0.85rem; color: var(--text-secondary)">${(row.timestamp || '').split('.')[0]}</td>
+                    <td>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <div class="formula-cell" title="${row.formula}">${row.formula}</div>
+                            <button class="copy-btn" onclick="copyFormula('${(row.formula || '').replace(/'/g, "\\'")}')">Copy</button>
+                        </div>
+                    </td>
+                    <td class="metric ${getColorClass(row.median_sharpe, 'sharpe')}">${parseFloat(row.median_sharpe).toFixed(2)}</td>
+                    <td class="metric ${getColorClass(row.worst_sharpe, 'sharpe')}">${parseFloat(row.worst_sharpe).toFixed(2)}</td>
+                    <td class="metric ${getColorClass(row.consistency, 'consistency')}">${parseFloat(row.consistency).toFixed(0)}%</td>
+                    <td class="metric ${getColorClass(row.turnover, 'turnover')}">${parseFloat(row.turnover).toFixed(1)}%</td>
+                    <td class="metric">${parseFloat(row.short_pct).toFixed(1)}%</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // Setup auto refresh
+        function setupAutoRefresh() {
+            const cb = document.getElementById('autoRefresh');
+            if (refreshInterval) clearInterval(refreshInterval);
+            
+            if (cb.checked) {
+                refreshInterval = setInterval(() => loadData(currentMode), 5000);
+            }
+            
+            cb.addEventListener('change', () => {
+                if (cb.checked) {
+                    refreshInterval = setInterval(() => loadData(currentMode), 5000);
+                } else {
+                    clearInterval(refreshInterval);
+                }
+            });
+        }
+
+        // Initialize
+        loadData('all');
+        setupAutoRefresh();
+
+    </script>
+</body>
+</html>
