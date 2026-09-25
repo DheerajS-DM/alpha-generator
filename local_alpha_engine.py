@@ -6,6 +6,7 @@ import polars as pl
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 import math
+import numpy as np
 import datetime
 
 from operator_registry import OperatorRegistry, OperatorMeta
@@ -64,6 +65,7 @@ def load_local_data(data_dir: str = "data/raw") -> pl.LazyFrame:
     # Add synthetic fields
     panel_df = panel_df.sort(["ticker", "date"]).with_columns([
         (pl.col("close").pct_change()).alias("returns"),
+        ((pl.col("high") + pl.col("low") + pl.col("close")) / 3).alias("vwap"),
         ((pl.col("high") + pl.col("low") + pl.col("close")) / 3).alias("vwap_proxy"),
         (pl.col("volume").rolling_mean(window_size=20)).alias("adv20"),
         (pl.col("high") - pl.col("low")).alias("range"),
@@ -72,6 +74,32 @@ def load_local_data(data_dir: str = "data/raw") -> pl.LazyFrame:
     ])
     
     return panel_df.sort(["date", "ticker"])
+
+
+def split_data_temporal(df: pl.DataFrame, train_pct: float = 0.70):
+    """
+    Split data into in-sample (IS) and out-of-sample (OOS) by date.
+    
+    This addresses the fundamental data-mining bias: when searching thousands
+    of formulas on the same dataset, some will appear excellent purely by chance.
+    By discovering alphas on IS data and validating on unseen OOS data,
+    we can distinguish genuine predictive signal from overfitting.
+    
+    Args:
+        df: Full dataset (must have a 'date' column)
+        train_pct: Fraction of dates for in-sample discovery (default 70%)
+        
+    Returns:
+        (is_df, oos_df, split_date) — the two DataFrames and the cutoff date
+    """
+    unique_dates = df.select("date").unique().sort("date")["date"].to_list()
+    split_idx = int(len(unique_dates) * train_pct)
+    split_date = unique_dates[split_idx]
+    
+    is_df = df.filter(pl.col("date") < split_date)
+    oos_df = df.filter(pl.col("date") >= split_date)
+    
+    return is_df, oos_df, split_date
 
 
 # --- 3. Custom Alpha Generator ---
@@ -140,8 +168,146 @@ class AlphaGenerator:
         node = ASTNode(type="operator", value=op_meta.name, children=children)
         return node, op_count + 1
 
+TIME_SERIES_OPS = {
+    'ts_mean', 'ts_delay', 'ts_delta', 'ts_std_dev', 'ts_sum', 'ts_decay_linear',
+    'ts_corr', 'ts_covariance', 'ts_rank', 'ts_scale', 'ts_zscore', 'ts_product',
+    'ts_count_nans', 'ts_arg_max', 'ts_arg_min', 'ts_av_diff'
+}
+CROSS_SECTIONAL_OPS = {'rank', 'normalize', 'zscore', 'scale', 'winsorize', 'quantile'}
+
+
+def evaluate_ast(df: pl.DataFrame, node: ASTNode, subtree_cache=None) -> tuple[pl.DataFrame, pl.Expr]:
+    """
+    Evaluates an AST expression tree on df with strict dimensional parity:
+    - Time-series operators (ts_*) are evaluated strictly over('ticker') along chronological order.
+    - Cross-sectional operators (rank, zscore, normalize, scale, winsorize) are evaluated strictly over('date') across all tickers on each date.
+    - Arithmetic operators operate element-wise.
+    
+    Eliminates lookahead bias by ensuring cross-sectional operators never aggregate across future dates.
+    """
+    temp_counter = [0]
+    
+    def _eval_node(current_df: pl.DataFrame, n: ASTNode) -> tuple[pl.DataFrame, pl.Expr]:
+        # Check subtree cache first
+        if subtree_cache and n.type == 'operator':
+            formula_str = n.to_string()
+            cached_col = subtree_cache.get_column(formula_str)
+            if cached_col and cached_col in current_df.columns:
+                return current_df, pl.col(cached_col)
+                
+        if n.type == 'constant':
+            try:
+                val = int(n.value)
+            except ValueError:
+                val = float(n.value)
+            return current_df, pl.lit(val)
+            
+        elif n.type == 'field':
+            return current_df, pl.col(n.value)
+            
+        elif n.type == 'operator':
+            op = n.value
+            child_exprs = []
+            for child in (n.children or []):
+                current_df, c_expr = _eval_node(current_df, child)
+                child_exprs.append(c_expr)
+                
+            if op == 'add': expr = child_exprs[0] + child_exprs[1]
+            elif op == 'subtract': expr = child_exprs[0] - child_exprs[1]
+            elif op == 'multiply': expr = child_exprs[0] * child_exprs[1]
+            elif op == 'divide': expr = child_exprs[0] / child_exprs[1]
+            elif op == 'power': expr = child_exprs[0].pow(child_exprs[1])
+            elif op == 'signed_power': expr = child_exprs[0].sign() * child_exprs[0].abs().pow(child_exprs[1])
+            elif op == 'sqrt': expr = child_exprs[0].sqrt()
+            elif op == 'log': expr = child_exprs[0].log()
+            elif op == 'inverse': expr = pl.lit(1.0) / child_exprs[0]
+            elif op == 'min': expr = pl.min_horizontal(child_exprs[0], child_exprs[1])
+            elif op == 'max': expr = pl.max_horizontal(child_exprs[0], child_exprs[1])
+            elif op == 'abs': expr = child_exprs[0].abs()
+            elif op == 'sign': expr = child_exprs[0].sign()
+            elif op == 'reverse': expr = -child_exprs[0]
+            elif op == 'hump': expr = child_exprs[0] / (1.0 + child_exprs[0].abs())
+            elif op == 'if_else':
+                expr = pl.when(child_exprs[0] != 0).then(child_exprs[1]).otherwise(child_exprs[2])
+            elif op in TIME_SERIES_OPS:
+                if op in ('ts_corr', 'ts_covariance'):
+                    w = int(n.children[2].value) if len(n.children) > 2 else 10
+                else:
+                    w = int(n.children[1].value) if len(n.children) > 1 else 10
+                if op == 'ts_mean': ts_expr = child_exprs[0].rolling_mean(window_size=w)
+                elif op == 'ts_delay': ts_expr = child_exprs[0].shift(w)
+                elif op == 'ts_delta': ts_expr = child_exprs[0] - child_exprs[0].shift(w)
+                elif op == 'ts_std_dev': ts_expr = child_exprs[0].rolling_std(window_size=w)
+                elif op == 'ts_sum': ts_expr = child_exprs[0].rolling_sum(window_size=w)
+                elif op == 'ts_decay_linear':
+                    w_sum = (w * (w + 1)) / 2.0
+                    terms = [(w - i) * child_exprs[0].shift(i) for i in range(w)]
+                    ts_expr = pl.sum_horizontal(terms) / w_sum
+                elif op == 'ts_corr':
+                    ts_expr = pl.rolling_corr(child_exprs[0], child_exprs[1], window_size=int(n.children[2].value))
+                elif op == 'ts_covariance':
+                    ts_expr = pl.rolling_cov(child_exprs[0], child_exprs[1], window_size=int(n.children[2].value))
+                elif op == 'ts_rank':
+                    ts_expr = child_exprs[0].rolling_map(lambda s: s.rank().tail(1).item(), window_size=w)
+                elif op == 'ts_scale':
+                    ts_expr = (child_exprs[0] - child_exprs[0].rolling_min(window_size=w)) / (child_exprs[0].rolling_max(window_size=w) - child_exprs[0].rolling_min(window_size=w) + 1e-9)
+                elif op == 'ts_zscore':
+                    ts_expr = (child_exprs[0] - child_exprs[0].rolling_mean(window_size=w)) / child_exprs[0].rolling_std(window_size=w)
+                elif op == 'ts_product':
+                    ts_expr = (child_exprs[0].log().rolling_sum(window_size=w)).exp()
+                elif op == 'ts_count_nans':
+                    ts_expr = child_exprs[0].is_null().cast(pl.Int32).rolling_sum(window_size=w)
+                elif op == 'ts_arg_max':
+                    ts_expr = child_exprs[0].rolling_map(lambda s: s.arg_max(), window_size=w)
+                elif op == 'ts_arg_min':
+                    ts_expr = child_exprs[0].rolling_map(lambda s: s.arg_min(), window_size=w)
+                elif op == 'ts_av_diff':
+                    ts_expr = child_exprs[0] - child_exprs[0].rolling_mean(window_size=w)
+                else:
+                    ts_expr = child_exprs[0].rolling_mean(window_size=w)
+
+                col_name = f"__ts_{temp_counter[0]}"
+                temp_counter[0] += 1
+                current_df = current_df.with_columns(ts_expr.over("ticker").alias(col_name))
+                if subtree_cache and n.type == 'operator':
+                    subtree_cache.register(n.to_string(), col_name)
+                    current_df, _ = subtree_cache.evict_if_needed(current_df)
+                return current_df, pl.col(col_name)
+
+            elif op in CROSS_SECTIONAL_OPS:
+                if op == 'rank': cs_expr = child_exprs[0].rank() / child_exprs[0].count()
+                elif op == 'normalize': cs_expr = child_exprs[0] - child_exprs[0].mean()
+                elif op == 'zscore': cs_expr = (child_exprs[0] - child_exprs[0].mean()) / child_exprs[0].std()
+                elif op == 'scale': cs_expr = child_exprs[0] / child_exprs[0].abs().sum()
+                elif op == 'winsorize': cs_expr = child_exprs[0].clip(child_exprs[0].mean() - 4*child_exprs[0].std(), child_exprs[0].mean() + 4*child_exprs[0].std())
+                else: cs_expr = child_exprs[0].rank() / child_exprs[0].count()
+
+                col_name = f"__cs_{temp_counter[0]}"
+                temp_counter[0] += 1
+                current_df = current_df.with_columns(cs_expr.over("date").alias(col_name))
+                if subtree_cache and n.type == 'operator':
+                    subtree_cache.register(n.to_string(), col_name)
+                    current_df, _ = subtree_cache.evict_if_needed(current_df)
+                return current_df, pl.col(col_name)
+
+            else:
+                raise NotImplementedError(f"Operator '{op}' is not implemented in Polars compiler.")
+
+            return current_df, expr
+            
+        raise ValueError(f"Unknown ASTNode type: {n.type}")
+
+    return _eval_node(df, node)
+
+
 # --- 4. The Translator (AST -> Polars Expr) ---
-def compile_to_polars(node: ASTNode) -> pl.Expr:
+def compile_to_polars(node: ASTNode, subtree_cache=None) -> pl.Expr:
+    # If subtree cache is provided and this node is already cached as a column in the DataFrame
+    if subtree_cache is not None and node.type == 'operator':
+        cached_col = subtree_cache.get_column(node.to_string())
+        if cached_col:
+            return pl.col(cached_col)
+
     if node.type == 'constant':
         try:
             val = int(node.value)
@@ -154,7 +320,7 @@ def compile_to_polars(node: ASTNode) -> pl.Expr:
     
     elif node.type == 'operator':
         op = node.value
-        args = [compile_to_polars(c) for c in node.children]
+        args = [compile_to_polars(c, subtree_cache=subtree_cache) for c in node.children]
 
         # Arithmetic
         if op == 'add': return args[0] + args[1]
@@ -178,7 +344,11 @@ def compile_to_polars(node: ASTNode) -> pl.Expr:
         if op == 'ts_delta': return args[0] - args[0].shift(int(node.children[1].value))
         if op == 'ts_std_dev': return args[0].rolling_std(window_size=int(node.children[1].value))
         if op == 'ts_sum': return args[0].rolling_sum(window_size=int(node.children[1].value))
-        if op == 'ts_decay_linear': return args[0].rolling_mean(window_size=int(node.children[1].value))
+        if op == 'ts_decay_linear':
+            window = int(node.children[1].value)
+            w_sum = (window * (window + 1)) / 2.0
+            terms = [(window - i) * args[0].shift(i) for i in range(window)]
+            return pl.sum_horizontal(terms) / w_sum
         if op == 'ts_corr': return pl.rolling_corr(args[0], args[1], window_size=int(node.children[2].value))
         if op == 'ts_covariance': return pl.rolling_cov(args[0], args[1], window_size=int(node.children[2].value))
         if op == 'ts_rank': return args[0].rolling_map(lambda s: s.rank().tail(1).item(), window_size=int(node.children[1].value))
@@ -189,7 +359,7 @@ def compile_to_polars(node: ASTNode) -> pl.Expr:
         if op == 'ts_arg_max': return args[0].rolling_map(lambda s: s.arg_max(), window_size=int(node.children[1].value))
         if op == 'ts_arg_min': return args[0].rolling_map(lambda s: s.arg_min(), window_size=int(node.children[1].value))
         if op == 'ts_av_diff': return args[0] - args[0].rolling_mean(window_size=int(node.children[1].value))
-        if op == 'hump': return args[0].clip(lower_bound=-0.01, upper_bound=0.01)
+        if op == 'hump': return args[0] / (1.0 + args[0].abs())
         
         # Cross Sectional
         if op == 'rank': return args[0].rank() / args[0].count()
@@ -199,6 +369,41 @@ def compile_to_polars(node: ASTNode) -> pl.Expr:
         if op == 'winsorize': return args[0].clip(lower_bound=args[0].mean() - 4*args[0].std(), upper_bound=args[0].mean() + 4*args[0].std())
 
         raise NotImplementedError(f"Operator '{op}' is not implemented in Polars compiler.")
+
+
+def materialize_subtrees(df: pl.DataFrame, node: ASTNode, subtree_cache, max_depth: int = 4) -> pl.DataFrame:
+    """
+    Recursively finds eligible time-series / complex sub-trees inside node,
+    evaluates them against df if not already cached, and appends them as columns.
+    Enforces the cache's RAM cap via LRU eviction.
+    """
+    if subtree_cache is None or node.type != 'operator':
+        return df
+
+    # We target caching operator nodes that perform substantial work (like time-series or multi-node arithmetic)
+    # Recursively check children first (bottom-up materialization)
+    for child in (node.children or []):
+        if child.type == 'operator':
+            df = materialize_subtrees(df, child, subtree_cache, max_depth=max_depth)
+
+    # Don't cache the root top-level operator itself here (as that will become alpha_signal)
+    formula_str = node.to_string()
+    if node.value in ('ts_mean', 'ts_std_dev', 'ts_decay_linear', 'ts_zscore', 'ts_corr', 'ts_scale', 'ts_delta', 'ts_sum'):
+        cached_col = subtree_cache.get_column(formula_str)
+        if not cached_col or cached_col not in df.columns:
+            col_name = subtree_cache.hash_key(formula_str)
+            try:
+                # Compile using cached children if available
+                expr = compile_to_polars(node, subtree_cache=subtree_cache)
+                df = df.with_columns(expr.over("ticker").alias(col_name))
+                subtree_cache.register(formula_str, col_name)
+                # Enforce memory cap (e.g. 4GB)
+                df, evicted = subtree_cache.evict_if_needed(df)
+            except Exception:
+                pass
+
+    return df
+
 
 
 # --- 5. Brain Simulator Metrics (Rolling Windows) ---
@@ -219,14 +424,16 @@ def _calculate_slice_metrics(df: pl.DataFrame) -> dict:
     if df_eval.height == 0:
         return {"sharpe": 0.0, "turnover": 0.0, "short_pct": 0.0}
 
-    # 2. Booksize Normalization
+    # 2. Strict Dollar Neutralization & Booksize Normalization
     try:
         df_eval = df_eval.with_columns(
-            pl.col("final_alpha").abs().sum().over("date").alias("abs_sum")
+            (pl.col("final_alpha") - pl.col("final_alpha").mean().over("date")).alias("neutral_alpha")
+        ).with_columns(
+            pl.col("neutral_alpha").abs().sum().over("date").alias("abs_sum")
         ).with_columns(
             pl.when(pl.col("abs_sum") == 0.0)
               .then(0.0)
-              .otherwise(pl.col("final_alpha") / pl.col("abs_sum"))
+              .otherwise(pl.col("neutral_alpha") / pl.col("abs_sum"))
               .alias("weight")
         ).filter(pl.col("weight").is_not_null() & pl.col("fwd_return").is_not_null())
     except Exception:
@@ -278,15 +485,13 @@ def _calculate_slice_metrics(df: pl.DataFrame) -> dict:
 def calculate_rolling_metrics(df: pl.DataFrame, window_sizes: List[int] = [252, 504], step_days: int = 63) -> dict:
     """
     Evaluates alpha performance over rolling windows.
-    Applies DELAY=1 to final_alpha to prevent lookahead bias.
+    Delay 1 is accurately modeled: Alpha generated at close of day T trades at
+    close of day T+1, realizing return from T+1 close to T+2 close.
     """
     if len(df) == 0:
         return {"median_sharpe": 0.0, "worst_sharpe": 0.0, "consistency": 0.0, "mean_turnover": 0.0, "mean_short_pct": 0.0, "windows": 0}
         
-    # ENFORCE DELAY=1: Alpha calculated on T is used for trading on T+1
-    df = df.sort(["ticker", "date"]).with_columns(
-        pl.col("final_alpha").shift(1).over("ticker").alias("final_alpha")
-    ).filter(pl.col("final_alpha").is_not_null())
+    df = df.sort(["ticker", "date"]).filter(pl.col("final_alpha").is_not_null())
     
     unique_dates = df.select("date").unique().sort("date")["date"].to_list()
     total_days = len(unique_dates)

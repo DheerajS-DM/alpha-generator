@@ -193,6 +193,50 @@
             transform: translateY(0);
             opacity: 1;
         }
+
+        /* Benchmark / Latency Cards */
+        .bench-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .bench-card {
+            background: var(--surface-color);
+            border: 1px solid var(--surface-border);
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            backdrop-filter: blur(10px);
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .bench-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(96, 165, 250, 0.4);
+        }
+
+        .bench-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            margin-bottom: 0.35rem;
+        }
+
+        .bench-val {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            font-family: 'Fira Code', monospace;
+        }
+
+        .bench-sub {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 0.25rem;
+        }
     </style>
 </head>
 <body>
@@ -205,10 +249,54 @@
                     <input type="checkbox" id="autoRefresh" checked>
                     <label for="autoRefresh">Auto-refresh (5s)</label>
                 </div>
+                <div style="font-size: 0.85rem; color: var(--text-secondary); background: var(--surface-color); padding: 0.4rem 0.8rem; border-radius: 0.5rem; border: 1px solid var(--surface-border);">
+                    Showing: <span id="recordCount" style="color: var(--text-primary); font-weight: 600;">0</span> records
+                </div>
+                <select id="rowLimit" onchange="renderTable()" style="background: var(--surface-color); color: var(--text-primary); border: 1px solid var(--surface-border); padding: 0.45rem 0.8rem; border-radius: 0.5rem; outline: none; font-family: inherit; font-size: 0.85rem;">
+                    <option value="100">Latest 100</option>
+                    <option value="250">Latest 250</option>
+                    <option value="500">Latest 500</option>
+                    <option value="1000">Latest 1,000</option>
+                    <option value="all">All Records</option>
+                </select>
                 <button class="btn active" id="btnAll" onclick="loadData('all')">Processed Alphas</button>
                 <button class="btn" id="btnElite" onclick="loadData('elite')">Elite Alphas</button>
             </div>
         </header>
+
+        <!-- Benchmark & Performance Cards -->
+        <div class="bench-grid" id="benchGrid">
+            <div class="bench-card">
+                <div class="bench-label">Throughput</div>
+                <div class="bench-val" id="bmThroughput" style="color: #34d399;">--</div>
+                <div class="bench-sub">alphas / sec</div>
+            </div>
+            <div class="bench-card">
+                <div class="bench-label">Avg Alpha Latency</div>
+                <div class="bench-val" id="bmAlphaLat" style="color: #60a5fa;">--</div>
+                <div class="bench-sub">end-to-end (ms)</div>
+            </div>
+            <div class="bench-card">
+                <div class="bench-label">Polars Eval Latency</div>
+                <div class="bench-val" id="bmPolarsLat" style="color: #a78bfa;">--</div>
+                <div class="bench-sub">over("ticker") (ms)</div>
+            </div>
+            <div class="bench-card">
+                <div class="bench-label">Rolling Backtest</div>
+                <div class="bench-val" id="bmMetricsLat" style="color: #f472b6;">--</div>
+                <div class="bench-sub">slices & sharpe (ms)</div>
+            </div>
+            <div class="bench-card">
+                <div class="bench-label">RAM Usage</div>
+                <div class="bench-val" id="bmRam" style="color: #fbbf24;">--</div>
+                <div class="bench-sub">process RSS (MB)</div>
+            </div>
+            <div class="bench-card">
+                <div class="bench-label">Tier-1 Cache Hits</div>
+                <div class="bench-val" id="bmCacheHits" style="color: #38bdf8;">--</div>
+                <div class="bench-sub">exact bypasses</div>
+            </div>
+        </div>
 
         <div class="table-container">
             <table id="dataTable">
@@ -236,7 +324,7 @@
     <script>
         let currentMode = 'all';
         let currentData = [];
-        let sortCol = 0;
+        let sortCol = -1; // -1 = newest alphas first (chronological reverse)
         let sortAsc = false;
         let refreshInterval = null;
 
@@ -247,19 +335,35 @@
             
             const file = mode === 'all' ? 'logs_processed.csv' : 'elite_alphas.csv';
             
-            // Add cache buster
-            Papa.parse(`${file}?t=${new Date().getTime()}`, {
-                download: true,
-                header: true,
-                skipEmptyLines: true,
-                complete: function(results) {
-                    currentData = results.data;
-                    renderTable();
-                },
-                error: function(err) {
-                    document.getElementById('tableBody').innerHTML = `<tr><td colspan="8" style="text-align:center; color: var(--danger-color);">Error loading ${file}. Waiting for generation...</td></tr>`;
-                }
-            });
+            // Fetch CSV with cache busting and no-store
+            fetch(`${file}?_t=${Date.now()}`, { cache: 'no-store' })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    return response.text();
+                })
+                .then(csvText => {
+                    Papa.parse(csvText, {
+                        header: true,
+                        skipEmptyLines: 'greedy',
+                        complete: function(results) {
+                            if (results.data && results.data.length > 0) {
+                                currentData = results.data;
+                                renderTable();
+                            }
+                        },
+                        error: function(err) {
+                            console.error("Papa parse error:", err);
+                        }
+                    });
+                })
+                .catch(err => {
+                    console.warn("Could not fetch CSV:", err);
+                    if (mode === 'elite') {
+                        document.getElementById('tableBody').innerHTML = `<tr><td colspan="8" style="text-align:center; color: var(--text-secondary);">No elite alphas found yet. Alphas must pass both In-Sample and Out-of-Sample verification.</td></tr>`;
+                    }
+                });
         }
 
         function getColorClass(value, type) {
@@ -304,60 +408,93 @@
 
         function renderTable() {
             const tbody = document.getElementById('tableBody');
-            if (currentData.length === 0) {
+            const recordBadge = document.getElementById('recordCount');
+            
+            if (!currentData || currentData.length === 0) {
+                if (recordBadge) recordBadge.innerText = '0';
                 tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: var(--text-secondary);">No alphas generated yet.</td></tr>';
                 return;
             }
 
-            // Map columns internally
-            // logs_processed: timestamp,processed_id,formula,median_sharpe,worst_sharpe,consistency,turnover,short_pct,windows
-            // elite_alphas: timestamp,elite_id,formula,median_sharpe,worst_sharpe,consistency,turnover,short_pct,windows
-            
-            let displayData = [...currentData];
-            
-            // Sort
-            displayData.sort((a, b) => {
-                let keys = ['processed_id', 'timestamp', 'formula', 'median_sharpe', 'worst_sharpe', 'consistency', 'turnover', 'short_pct'];
-                if (currentMode === 'elite') keys[0] = 'elite_id';
-                
-                let valA = a[keys[sortCol]];
-                let valB = b[keys[sortCol]];
-                
-                if (sortCol !== 1 && sortCol !== 2) {
-                    valA = parseFloat(valA) || 0;
-                    valB = parseFloat(valB) || 0;
-                }
-                
-                if (valA < valB) return sortAsc ? -1 : 1;
-                if (valA > valB) return sortAsc ? 1 : -1;
-                return 0;
-            });
+            // Filter out empty rows or corrupted entries
+            const validData = currentData.filter(r => r && (r.formula || r.processed_id || r.elite_id));
+            if (recordBadge) recordBadge.innerText = validData.length.toLocaleString();
 
-            tbody.innerHTML = '';
+            let displayData = [...validData];
+            
+            // Sort: default to latest entries first if sortCol is 0 or -1
+            if (sortCol === -1) {
+                // Natural order in CSV is chronological, so reverse to show newest first
+                displayData.reverse();
+            } else {
+                const colKeyMap = {
+                    0: currentMode === 'all' ? 'processed_id' : 'elite_id',
+                    1: 'timestamp',
+                    2: 'formula',
+                    3: 'median_sharpe',
+                    4: 'worst_sharpe',
+                    5: 'consistency',
+                    6: 'turnover',
+                    7: 'short_pct'
+                };
+                const key = colKeyMap[sortCol] || 'processed_id';
+
+                displayData.sort((a, b) => {
+                    let valA = a[key];
+                    let valB = b[key];
+                    
+                    if (sortCol !== 1 && sortCol !== 2) {
+                        valA = Number.isFinite(parseFloat(valA)) ? parseFloat(valA) : -999999;
+                        valB = Number.isFinite(parseFloat(valB)) ? parseFloat(valB) : -999999;
+                    }
+                    
+                    if (valA < valB) return sortAsc ? -1 : 1;
+                    if (valA > valB) return sortAsc ? 1 : -1;
+                    return 0;
+                });
+            }
+
+            // Apply row limit for fast browser rendering
+            const limitVal = document.getElementById('rowLimit') ? document.getElementById('rowLimit').value : '100';
+            if (limitVal !== 'all') {
+                const limitNum = parseInt(limitVal, 10) || 100;
+                displayData = displayData.slice(0, limitNum);
+            }
+
+            // Use DocumentFragment for high performance rendering without browser freezing
+            const fragment = document.createDocumentFragment();
             
             displayData.forEach(row => {
                 const idKey = currentMode === 'all' ? 'processed_id' : 'elite_id';
                 const id = row[idKey] || '-';
                 
+                const medSharpe = Number.isFinite(parseFloat(row.median_sharpe)) ? parseFloat(row.median_sharpe).toFixed(2) : '0.00';
+                const worstSharpe = Number.isFinite(parseFloat(row.worst_sharpe)) ? parseFloat(row.worst_sharpe).toFixed(2) : '0.00';
+                const consistency = Number.isFinite(parseFloat(row.consistency)) ? `${parseFloat(row.consistency).toFixed(0)}%` : '0%';
+                const turnover = Number.isFinite(parseFloat(row.turnover)) ? `${parseFloat(row.turnover).toFixed(1)}%` : 'nan';
+                const shortPct = Number.isFinite(parseFloat(row.short_pct)) ? `${parseFloat(row.short_pct).toFixed(1)}%` : '0.0%';
+
                 const tr = document.createElement('tr');
-                
                 tr.innerHTML = `
                     <td style="color: var(--text-secondary)">#${id}</td>
                     <td style="font-size: 0.85rem; color: var(--text-secondary)">${(row.timestamp || '').split('.')[0]}</td>
                     <td>
                         <div style="display: flex; align-items: center; gap: 0.5rem;">
-                            <div class="formula-cell" title="${row.formula}">${row.formula}</div>
-                            <button class="copy-btn" onclick="copyFormula('${(row.formula || '').replace(/'/g, "\\'")}')">Copy</button>
+                            <div class="formula-cell" title="${row.formula || ''}">${row.formula || ''}</div>
+                            <button class="copy-btn" onclick="copyFormula('${(row.formula || '').replace(/['\\]/g, "\\$&")}')">Copy</button>
                         </div>
                     </td>
-                    <td class="metric ${getColorClass(row.median_sharpe, 'sharpe')}">${parseFloat(row.median_sharpe).toFixed(2)}</td>
-                    <td class="metric ${getColorClass(row.worst_sharpe, 'sharpe')}">${parseFloat(row.worst_sharpe).toFixed(2)}</td>
-                    <td class="metric ${getColorClass(row.consistency, 'consistency')}">${parseFloat(row.consistency).toFixed(0)}%</td>
-                    <td class="metric ${getColorClass(row.turnover, 'turnover')}">${parseFloat(row.turnover).toFixed(1)}%</td>
-                    <td class="metric">${parseFloat(row.short_pct).toFixed(1)}%</td>
+                    <td class="metric ${getColorClass(row.median_sharpe, 'sharpe')}">${medSharpe}</td>
+                    <td class="metric ${getColorClass(row.worst_sharpe, 'sharpe')}">${worstSharpe}</td>
+                    <td class="metric ${getColorClass(row.consistency, 'consistency')}">${consistency}</td>
+                    <td class="metric ${getColorClass(row.turnover, 'turnover')}">${turnover}</td>
+                    <td class="metric">${shortPct}</td>
                 `;
-                tbody.appendChild(tr);
+                fragment.appendChild(tr);
             });
+
+            tbody.innerHTML = '';
+            tbody.appendChild(fragment);
         }
 
         // Setup auto refresh
@@ -366,20 +503,59 @@
             if (refreshInterval) clearInterval(refreshInterval);
             
             if (cb.checked) {
-                refreshInterval = setInterval(() => loadData(currentMode), 5000);
+                refreshInterval = setInterval(() => {
+                    loadData(currentMode);
+                    loadBenchmarkMetrics();
+                }, 5000);
             }
             
             cb.addEventListener('change', () => {
                 if (cb.checked) {
-                    refreshInterval = setInterval(() => loadData(currentMode), 5000);
+                    refreshInterval = setInterval(() => {
+                        loadData(currentMode);
+                        loadBenchmarkMetrics();
+                    }, 5000);
                 } else {
                     clearInterval(refreshInterval);
                 }
             });
         }
 
+        // Live Benchmark & Latency Metrics Loader
+        function loadBenchmarkMetrics() {
+            fetch(`benchmark_metrics.json?t=${new Date().getTime()}`)
+                .then(res => {
+                    if (!res.ok) throw new Error("No benchmark data yet");
+                    return res.json();
+                })
+                .then(data => {
+                    if (data.throughput_alphas_per_sec !== undefined) {
+                        document.getElementById('bmThroughput').innerText = data.throughput_alphas_per_sec;
+                    }
+                    if (data.latencies_ms && data.latencies_ms.total_alpha_ms) {
+                        document.getElementById('bmAlphaLat').innerText = `${data.latencies_ms.total_alpha_ms.avg} ms`;
+                    }
+                    if (data.latencies_ms && data.latencies_ms.polars_eval_ms) {
+                        document.getElementById('bmPolarsLat').innerText = `${data.latencies_ms.polars_eval_ms.avg} ms`;
+                    }
+                    if (data.latencies_ms && data.latencies_ms.rolling_metrics_ms) {
+                        document.getElementById('bmMetricsLat').innerText = `${data.latencies_ms.rolling_metrics_ms.avg} ms`;
+                    }
+                    if (data.process_rss_mb !== undefined) {
+                        document.getElementById('bmRam').innerText = `${data.process_rss_mb} MB`;
+                    }
+                    if (data.tier1_cache_hits !== undefined) {
+                        document.getElementById('bmCacheHits').innerText = data.tier1_cache_hits;
+                    }
+                })
+                .catch(() => {
+                    // Silently wait if benchmark file is not yet populated
+                });
+        }
+
         // Initialize
         loadData('all');
+        loadBenchmarkMetrics();
         setupAutoRefresh();
 
     </script>

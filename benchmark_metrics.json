@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-09-26 03:56:38",
+  "uptime_seconds": 34.3,
+  "total_evaluated": 9,
+  "throughput_alphas_per_sec": 0.26,
+  "process_rss_mb": 2057.05,
+  "tier1_cache_hits": 0,
+  "tier2_cache_hits": 0,
+  "latencies_ms": {
+    "ast_generation_ms": {
+      "avg": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "p95": 0.0
+    },
+    "compiler_ms": {
+      "avg": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "p95": 0.0
+    },
+    "polars_eval_ms": {
+      "avg": 359.7,
+      "min": 151.39,
+      "max": 988.31,
+      "p95": 259.73
+    },
+    "rolling_metrics_ms": {
+      "avg": 3445.29,
+      "min": 2576.79,
+      "max": 4016.06,
+      "p95": 3029.85
+    },
+    "total_alpha_ms": {
+      "avg": 3805.84,
+      "min": 2812.03,
+      "max": 4898.65,
+      "p95": 3289.58
+    }
+  }
+}

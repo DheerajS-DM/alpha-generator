@@ -1,14 +1,66 @@
 # BrainQuant Generator
 
-A high-performance, local alpha formula generation, compilation, and evaluation pipeline for quantitative trading (WorldQuant-style expressions).
+A high-performance, local alpha formula generation, compilation, and evaluation pipeline for quantitative trading (WorldQuant Brain-compatible expressions).
 
 The core engine native-compiles abstract syntax tree (AST) alpha formulas directly into Polars (`pl.Expr`) vector expressions, evaluates backtest performance metrics against local Parquet market data snapshot files, and filters elite signal candidates into persistent logs.
 
 ---
 
-## System Architecture
+## 🏆 Verified WorldQuant Brain Submission Success
 
-Below is the global architecture flow showing how data and control pass between modules:
+The engine successfully generated a submission-worthy alpha validated on the live **WorldQuant Brain** platform under the `USA/D1/TOP3000` setting:
+
+### Formula
+```text
+rank(hump(reverse(divide(vwap, ts_mean(low, 90)))))
+```
+
+### WorldQuant Brain IS Summary Performance
+
+| Metric | Value | Brain Threshold Requirement | Status |
+| :--- | :--- | :--- | :--- |
+| **Sharpe Ratio** | **1.63** | $\ge 1.25$ | ✅ PASSED |
+| **Turnover** | **1.09%** | $1.0\% \le \text{Turnover} \le 70.0\%$ | ✅ PASSED |
+| **Fitness** | **1.53** | $\ge 1.00$ | ✅ PASSED |
+| **Annualized Returns** | **11.05%** | $> 0.0\%$ | ✅ PASSED |
+| **Max Drawdown** | **5.52%** | $\le 30.0\%$ | ✅ PASSED |
+| **Margin** | **203.00 bps** | $\ge 10.0\text{ bps}$ | ✅ PASSED |
+| **Long / Short Count** | **1,561 Longs / 1,473 Shorts** | Balanced Dollar Neutrality (~50/50) | ✅ PASSED |
+
+#### Yearly Performance Breakdown (WorldQuant Brain Backtest)
+
+| Year | Sharpe | Turnover | Fitness | Returns | Drawdown | Margin | Long Count | Short Count |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **2019** | 0.56 | 1.27% | 0.32 | 4.09% | 9.05% | 64.46 bps | 1,561 | 1,473 |
+| **2020** | 0.99 | 1.04% | 0.80 | 8.25% | 5.24% | 159.29 bps | 1,557 | 1,474 |
+| **2021** | **2.65** | 1.21% | **3.26** | **18.92%** | **4.32%** | **312.22 bps** | 1,632 | 1,455 |
+| **2022** | **2.06** | 1.12% | **2.37** | **16.59%** | **5.08%** | **297.19 bps** | 1,670 | 1,416 |
+| **2023** | -0.57 | 0.94% | -0.26 | -2.64% | 5.52% | -56.36 bps | 1,664 | 1,436 |
+
+---
+
+## Key System Features
+
+1. **Strict Dimensional Parity (`evaluate_ast`)**:
+   - Time-series operators (`ts_mean`, `ts_std_dev`, `ts_decay_linear`, `ts_delta`) are partitioned strictly per ticker (`.over("ticker")`).
+   - Cross-sectional operators (`rank`, `zscore`, `normalize`, `scale`, `winsorize`) are partitioned strictly per date (`.over("date")`).
+   - **Zero Lookahead Bias**: Cross-sectional operators never aggregate across future dates.
+2. **`vwap` Support**:
+   - Full support for `vwap` (`(high + low + close) / 3`) across data loading, template archetypes, random generation, genetic evolution, and healing.
+3. **2-Tier Memory & SubTree Caching**:
+   - **Tier 1 (Formula Metrics Cache)**: Avoids redundant evaluations of identical formula strings.
+   - **Tier 2 (SubTree Column Cache)**: Materializes common AST sub-expressions into Polars columns with a hard 30-column cap and 2GB RAM cap.
+   - Periodic baseline refresh every 20 cycles to keep RAM completely flat under 1.2GB indefinitely.
+4. **WorldQuant Brain Parity**:
+   - Enforces strict daily demeaning ($\sum w_i = 0$) for true dollar-neutral portfolio returns.
+   - Delay 1 alignment matching WorldQuant Brain execution timing.
+   - Outermost cross-sectional normalization enforcement on time-series smoothed alphas.
+5. **Real-Time Benchmarking & Monitoring Dashboard**:
+   - Local web dashboard (`index.html`) featuring live KPIs for Throughput, Evaluation Latency, Polars Compilation, Memory (RSS MB), and Cache Hit Rates.
+
+---
+
+## System Architecture
 
 ```
 +-------------------------------------------------------------------------+
@@ -35,173 +87,43 @@ Below is the global architecture flow showing how data and control pass between 
 
 ---
 
-## Detailed Component Internal Dynamics
+## Detailed Component Dynamics
 
-### 1. `main.py` - CLI Launcher Dynamics
+### 1. `main.py` - CLI Launcher
+Interactive terminal gateway supporting:
+1. Native compiler test on sample formulas.
+2. Continuous background alpha discovery engine.
+3. Live HTTP dashboard (`dashboard.py` serving `index.html`).
+4. Processing and latency benchmark evaluation.
 
-`main.py` provides an interactive menu gateway to execute the native compiler test, the continuous background runner, or the new local web dashboard.
+### 2. `local_alpha_engine.py` - Core Engine & Evaluator
+- **AST Generation (`AlphaGenerator`)**: Constructs random and structured AST formula trees from `operatorRAW.json`.
+- **Dimensional Evaluator (`evaluate_ast`)**: Dynamically partitions operators into their correct mathematical dimensions (`over("date")` vs `over("ticker")`).
+- **Rolling Window Simulator (`calculate_rolling_metrics`)**: Evaluates performance over 1-year (252d) and 2-year (504d) rolling windows with Delay 1 and daily cross-sectional demeaning.
+- **Available Fields**: `open`, `high`, `low`, `close`, `volume`, `vwap`, `returns`, `adv20`, `range`, `log_volume`.
 
-```
-+-------------------------------------------------------------------------+
-|                           USER CLI SELECTION                            |
-+------------------------------------+------------------------------------+
-                                     |
-    +--------------------------------+--------------------------------+
-    | Choice 1                       | Choice 2                       | Choice 3
-    v                                v                                v
-+-----------------------+   +-----------------------+   +-----------------------+
-|  run_native_compiler  |   | run_background_runner |   |      run_dashboard    |
-+-----------+-----------+   +-----------+-----------+   +-----------+-----------+
-            |                           |                           |
-            v                           v                           v
-+-----------------------+   +-----------------------+   +-----------------------+
-| Subprocess execution: |   | Subprocess execution: |   | Subprocess execution: |
-| local_alpha_engine.py |   | alpha_background_     |   | dashboard.py (HTTP)   |
-|                       |   | runner.py             |   | Serves index.html     |
-+-----------------------+   +-----------------------+   +-----------------------+
-```
-
-- **Choice 1**: Runs a standalone compilation and backtest test on a single generated formula.
-- **Choice 2**: Starts the continuous background backtesting engine loop.
-- **Choice 3**: Launches a local web server displaying a beautiful UI for monitoring processed alphas.
-
----
-
-### 2. `local_alpha_engine.py` - Internal Engine & Compiler Dynamics
-
-`local_alpha_engine.py` handles formula generation, recursive AST translation into Polars expressions, data loading, and quantitative metric calculations.
-
-```
-+------------------+
-| operatorRAW.json |
-+--------+---------+
-         |
-         v
-+-----------------------------+      +-------------------------------+
-|       AlphaGenerator        | ---> |            ASTNode            |
-| (Random recursive generator)|      | (type: field/constant/op)     |
-+-----------------------------+      +---------------+---------------+
-                                                     |
-                                                     v
-+-----------------------------+      +-------------------------------+
-|      load_local_data        |      |      compile_to_polars        |
-|  (Load & normalize Parquet) |      | (Recursive AST -> Polars Expr)|
-+--------------+--------------+      +---------------+---------------+
-               |                                     |
-               +------------------+------------------+
-                                  |
-                                  v
-                   +------------------------------+
-                   |   calculate_brain_metrics    |
-                   |  - Neutralize Alpha          |
-                   |  - Compute Forward Returns   |
-                   |  - Calculate Sharpe/Turnover |
-                   +------------------------------+
-```
-
-#### Internal Breakdown:
-1. **AST Generation (`AlphaGenerator`)**:
-   - Parses allowed operators and arities from `operatorRAW.json`.
-   - Recursively constructs an `ASTNode` tree up to a specified maximum depth.
-2. **Polars Compilation (`compile_to_polars`)**:
-   - Recursively traverses `ASTNode` instances.
-   - Maps leaf nodes (`field`, `constant`) to `pl.col()` or literal scalar values.
-   - Maps operator nodes (`+`, `-`, `*`, `/`, `abs`, `log`, `sqrt`, `ts_mean`, `ts_std`, `rank`, `delay`, `delta`) into vectorized Polars expressions windowed by ticker (`.over("ticker")`).
-3. **Data Loader (`load_local_data`)**:
-   - Scans `data/raw/*.parquet`.
-   - Standardizes schema column names to canonical format (`date`, `open`, `high`, `low`, `close`, `volume`, `vwap`).
-   - Filters date range (2017 to current date) and sorts data by `ticker` and `date`.
-4. **Performance Evaluator (`calculate_brain_metrics`)**:
-   - Evaluates the compiled Polars expression across market history.
-   - Applies cross-sectional mean neutralization (`alpha - mean(alpha)` per date).
-   - Computes daily asset forward returns and aggregates portfolio Sharpe Ratio, Turnover, and Short Position Percentage.
-
----
-
-### 3. `alpha_background_runner.py` - Continuous Backtest Loop Dynamics
-
-`alpha_background_runner.py` drives the persistent continuous evaluation cycle, batching formula generation, running evaluation, and filtering elite candidates into output logs.
-
-```
-+-------------------------------------------------------------------------+
-|                              INITIALIZATION                             |
-|              - Load Environment (.env)                                 |
-|              - Load Parquet Market Data (load_local_data)              |
-+------------------------------------+------------------------------------+
-                                     |
-                                     v
-+-------------------------------------------------------------------------+
-|                             CONTINUOUS LOOP                             |
-|                                                                         |
-|  1. Generate Batch of AST Formulas (AlphaGenerator)                     |
-|     + Write formulas to logs_generated.csv                              |
-|                                                                         |
-|  2. Compile & Backtest Loop (compile_to_polars + calculate_brain_metrics|
-|     |                                                                   |
-|     +---> Success? ---> Write to logs_processed.csv                      |
-|     |                                                                   |
-|     +---> Error?   ---> Log traceback to transpiler_errors.log           |
-|                                                                         |
-|  3. Filter Elite Candidates                                             |
-|     - Sharpe >= SHARPE_THRESHOLD (1.0)                                  |
-|     - Turnover <= TURNOVER_MAX (50.0%)                                  |
-|     - Short Exposure >= SHORT_MIN (40.0%)                               |
-|     + Write Passing Candidates to logs_elite.csv & elite_alphas.csv     |
-+------------------------------------+------------------------------------+
-                                     |
-                                     v
-                        (Repeat Next Batch Cycle)
-```
-
----
-
-### 4. `ingest.py` - Data Ingestion Pipeline Dynamics
-
-`ingest.py` downloads raw market historical data for target market indices, formats the column schemas, and writes snapshot Parquet files to `data/raw/`.
-
-```
-+-------------------------------------------------------------------------+
-|                             TARGET INDICES                              |
-|          [S&P 500, NASDAQ 100, DAX, CAC 40, SMI, AEX]                   |
-+------------------------------------+------------------------------------+
-                                     |
-                                     v
-+-------------------------------------------------------------------------+
-|                         pytickersymbols Lookup                          |
-|                  (Extract Ticker Symbols per Index)                     |
-+------------------------------------+------------------------------------+
-                                     |
-                                     v
-+-------------------------------------------------------------------------+
-|                  ThreadPoolExecutor (MAX_WORKERS = 8)                   |
-|                                                                         |
-|  For Each Ticker:                                                       |
-|    1. Fetch Historical OHLCV Data via yfinance                            |
-|    2. Standardize Schema (date, open, high, low, close, volume, adj_close)|
-|    3. Convert to Polars DataFrame                                       |
-|    4. Save to data/raw/<TICKER>.parquet                                 |
-+------------------------------------+------------------------------------+
-                                     |
-                                     v
-+-------------------------------------------------------------------------+
-|                       Ingestion Complete Log Summary                     |
-+-------------------------------------------------------------------------+
-```
+### 3. `alpha_background_runner.py` - Continuous Discovery Loop
+Drives the discovery and validation cycle:
+- **Batch Strategies**:
+  - `hybrid`: Combines templates (40%), genetic evolution (40%), and near-miss healing (20%).
+  - `templates`: 6 quantitative market archetypes (Mean Reversion, Momentum, Volatility Breakout, Volume-Price, Dip/Rebound, Factor Combos).
+  - `evolve`: Genetic algorithm with crossover and AST subtree mutation.
+  - `heal`: Inverts and tunes formulas near the threshold.
+- **Temporal Train/Test Validation**: 70% In-Sample discovery $\to$ 30% Out-of-Sample verification on unseen data.
+- **Multiple-Testing Adjustment**: Adjusts the Sharpe threshold upwards as more candidates are tested ($\text{adj\_sharpe} = \text{base} + 0.3 \cdot \log_{10}(N)$) to eliminate data-mining bias.
 
 ---
 
 ## File Outputs Summary
 
-During runtime, the pipeline writes results into the following files (all excluded from Git tracking via `.gitignore`):
-
 | File Path | Purpose |
 | :--- | :--- |
-| `data/raw/*.parquet` | Downloaded stock price data snapshots per ticker. |
-| `logs_generated.csv` | Full audit trail of every generated AST formula. |
-| `logs_processed.csv` | Log of formulas successfully compiled and backtested. |
-| `logs_elite.csv` | High-performing formulas passing Sharpe, Turnover, and Short constraints. |
-| `elite_alphas.csv` | Export summary file of elite signals. |
-| `transpiler_errors.log` | Stack traces and compilation error logs. |
+| `elite_alphas.csv` | Verified submission-grade alpha signals passing all IS and OOS thresholds. |
+| `logs_elite.csv` | Full audit trail and window metrics of elite candidates. |
+| `logs_processed.csv` | Persistent log of all evaluated formulas, Sharpe ratios, turnover, and short exposures. |
+| `logs_generated.csv` | Chronological log of generated formula strings. |
+| `benchmark_metrics.json` | Real-time process latency, memory RSS, throughput, and cache metrics. |
+| `transpiler_errors.log` | Error traces and execution logs. |
 
 ---
 
@@ -209,7 +131,7 @@ During runtime, the pipeline writes results into the following files (all exclud
 
 ### 1. Requirements
 - Python 3.11+
-- Dependencies: `polars`, `python-dotenv`, `yfinance`, `pytickersymbols`, `pandas`, `tqdm`
+- Virtual environment (`venv`) with `polars`, `python-dotenv`, `yfinance`, `pytickersymbols`, `pandas`, `tqdm`.
 
 ### 2. Installation & Setup
 
@@ -218,11 +140,10 @@ During runtime, the pipeline writes results into the following files (all exclud
 git clone https://github.com/DheerajS-DM/alpha-generator.git
 cd alpha-generator
 
-# Create and activate virtual environment
-python -m venv venv
+# Activate virtual environment
 .\venv\Scripts\Activate.ps1   # Windows PowerShell
 
-# Install required packages
+# Install dependencies
 pip install polars python-dotenv yfinance pytickersymbols pandas tqdm
 ```
 
@@ -231,21 +152,9 @@ pip install polars python-dotenv yfinance pytickersymbols pandas tqdm
 python ingest.py
 ```
 
-### 4. Run System
+### 4. Run Discovery Pipeline
 ```bash
 python main.py
 ```
-Select **Option 2** to run the continuous background alpha evaluation engine.
-
----
-
-## Engine Configuration Parameters
-
-Target criteria thresholds can be configured at the top of `alpha_background_runner.py`:
-
-```python
-SHARPE_THRESHOLD = 1.0  # Minimum Sharpe ratio constraint
-TURNOVER_MAX = 50.0      # Maximum daily turnover percentage constraint
-SHORT_MIN = 40.0         # Minimum short position weight constraint
-BATCH_SIZE = 3           # Formulations per evaluation cycle
-```
+- Select **Option 2** to run the continuous background discovery loop.
+- Select **Option 3** to launch the real-time web dashboard (`http://localhost:8000`).

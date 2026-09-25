@@ -11,8 +11,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
         
     def end_headers(self):
-        # Disable caching for CSV files so the dashboard updates live
-        if self.path.endswith('.csv'):
+        # Disable caching for CSV and JSON files so the dashboard updates live
+        if self.path.endswith('.csv') or self.path.endswith('.json'):
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
         super().end_headers()
 
